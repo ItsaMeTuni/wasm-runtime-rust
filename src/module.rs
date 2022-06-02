@@ -10,8 +10,8 @@ pub struct Module {
 }
 
 pub struct Function {
-    offset: u32,
-    type_idx: u32
+    offset: usize,
+    type_idx: u8
 }
 
 pub struct Export {
@@ -59,8 +59,44 @@ struct Section {
     length: u32,
 }
 
-struct MalformedBytecodeError;
-type Result<T> = Result<T, MalformedBytecodeError>;
+enum MalformedBytecodeError {
+    MissingSection(SectionId),
+    MissingFunctionBody(u32)
+}
+type ParserResult<T> = Result<T, MalformedBytecodeError>;
+
+struct CodeSection {
+    fn_body_offsets: Vec<usize>
+}
+
+impl CodeSection {
+    fn from_section(code_section: &Section, bytecode: &Bytecode) -> Self {
+        let mut offset = code_section.offset;
+        let function_count = bytecode.read_u32(&mut offset);
+
+        let mut offsets = vec![];
+
+        for _ in 0..function_count {
+            let body_size = bytecode.read_u32(&mut offset);
+
+            // + 1 to skip local declarations
+            // TODO: fix this
+            offsets.push(offset + 1);
+
+            offset += body_size as usize;
+        }
+
+        return CodeSection {
+            fn_body_offsets: offsets
+        };
+    }
+
+    fn get_code_offset_for_fn(&self, fn_idx: u32) -> ParserResult<usize> {
+        self.fn_body_offsets.get(fn_idx as usize)
+            .map(|offset| *offset)
+            .ok_or(MalformedBytecodeError::MissingFunctionBody(fn_idx))
+    }
+}
 
 pub fn parse(bytecode: &Bytecode) -> () {
     let sections = read_sections(bytecode);
@@ -93,10 +129,13 @@ fn read_sections(bytecode: &Bytecode) -> Vec<Section> {
     sections
 }
 
-fn try_read_functions(bytecode: &Bytecode, sections: &Vec<Section>) -> Option<Vec<Function>> {
-    let functions_section = find_section_by_id(sections, SectionId::Functions)?;
+fn try_read_functions(bytecode: &Bytecode, sections: &Vec<Section>) -> ParserResult<Vec<Function>> {
+    let code_section = CodeSection::from_section(
+        get_section_by_id(sections, SectionId::Code)?,
+        bytecode
+    );
 
-    let function_body_offsets = get_function_body_offsets(bytecode, sections);
+    let functions_section = get_section_by_id(sections, SectionId::Functions)?;
 
     let mut offset = functions_section.offset;
     let functions_count = bytecode.read_u32(&mut offset);
@@ -105,7 +144,7 @@ fn try_read_functions(bytecode: &Bytecode, sections: &Vec<Section>) -> Option<Ve
 
     for function_idx in 0..functions_count {
         let type_idx = bytecode.read_char(&mut offset);
-        let body_offset = function_body_offsets.get(function_idx).unwrap();
+        let body_offset = code_section.get_code_offset_for_fn(function_idx)?;
 
         let function = Function {
             offset: body_offset,
@@ -115,32 +154,14 @@ fn try_read_functions(bytecode: &Bytecode, sections: &Vec<Section>) -> Option<Ve
         functions.push(function);
     }
     
-    return Some(functions);
-}
-
-fn get_function_body_offsets(bytecode: &Bytecode, sections: &Vec<Section>) -> Vec<usize> {
-    let code_section = find_section_by_id(sections, SectionId::Code)?;
-
-    let mut offset = code_section.offset;
-    let function_count = bytecode.read_u32(&mut offset);
-
-    let offsets = vec![];
-
-    for function_idx in 0..function_count {
-        let body_size = bytecode.read_u32(&mut offset);
-
-        // + 1 to skip local declarations
-        // TODO: fix this
-        offsets.push(offset + 1);
-
-        offset += body_size as usize;
-    }
-
-    return offsets;
-
+    return Ok(functions);
 }
 
 fn find_section_by_id(sections: &Vec<Section>, id: SectionId) -> Option<&Section> {
     sections.iter()
         .find(|section| section.id == id)
+}
+
+fn get_section_by_id(sections: &Vec<Section>, id: SectionId) -> ParserResult<&Section> {
+    find_section_by_id(sections, id).ok_or(MalformedBytecodeError::MissingSection(id))
 }
